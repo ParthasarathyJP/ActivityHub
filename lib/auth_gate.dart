@@ -61,6 +61,7 @@ class AuthGate extends StatelessWidget {
                   adminName: adminName,
                   email: email,
                   uid: uid,
+                  userType: userType,
                 );
               case 'Staff':
                 // TODO: return StaffDashboard(...)

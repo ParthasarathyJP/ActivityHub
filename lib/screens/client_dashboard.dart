@@ -13,6 +13,7 @@ class ClientDashboard extends StatefulWidget {
   final String adminName;
   final String email;
   final String uid;
+  final String userType;
 
   const ClientDashboard({
     super.key,
@@ -21,6 +22,7 @@ class ClientDashboard extends StatefulWidget {
     required this.adminName,
     required this.email,
     required this.uid,
+    this.userType = 'Client',
   });
 
   @override
@@ -115,6 +117,7 @@ class _ClientDashboardState extends State<ClientDashboard>
             FinanceTab(
               clientId: widget.clientId,
               branchId: widget.branchId,
+              userType: widget.userType,
             ),
             MoreTab(
               clientId:        widget.clientId,
