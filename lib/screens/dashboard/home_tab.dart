@@ -41,37 +41,40 @@ class _HomeTabState extends State<HomeTab> {
   }
 
   Future<void> _loadStats() async {
-    try {
-      final db = FirebaseFirestore.instance;
-      final results = await Future.wait([
-        db.collection('Student')
-            .where('ClientID', isEqualTo: widget.clientId)
-            .count()
-            .get(),
-        db.collection('Course')
-            .where('ClientID', isEqualTo: widget.clientId)
-            .count()
-            .get(),
-        db.collection('Staff')
-            .where('ClientID', isEqualTo: widget.clientId)
-            .count()
-            .get(),
-        db.collection('Branch')
-            .where('ClientID', isEqualTo: widget.clientId)
-            .count()
-            .get(),
-      ]);
-      if (mounted) {
-        setState(() {
-          _studentCount = results[0].count ?? 0;
-          _courseCount  = results[1].count ?? 0;
-          _staffCount   = results[2].count ?? 0;
-          _branchCount  = results[3].count ?? 0;
-          _statsLoaded  = true;
-        });
+    final db = FirebaseFirestore.instance;
+
+    // Query each independently — one failure won't zero out others
+    Future<int> safeCount(Query q) async {
+      try {
+        final snap = await q.count().get();
+        return snap.count ?? 0;
+      } catch (e) {
+        debugPrint('Count query failed: $e');
+        // Fallback: get docs and count manually
+        try {
+          final snap = await q.get();
+          return snap.docs.length;
+        } catch (_) { return 0; }
       }
-    } catch (e) {
-      if (mounted) setState(() => _statsLoaded = true);
+    }
+
+    final studentCount = await safeCount(
+        db.collection('Student').where('ClientID', isEqualTo: widget.clientId));
+    final courseCount  = await safeCount(
+        db.collection('Course').where('ClientID', isEqualTo: widget.clientId));
+    final staffCount   = await safeCount(
+        db.collection('Staff').where('ClientID', isEqualTo: widget.clientId));
+    final branchCount  = await safeCount(
+        db.collection('Branch').where('ClientID', isEqualTo: widget.clientId));
+
+    if (mounted) {
+      setState(() {
+        _studentCount = studentCount;
+        _courseCount  = courseCount;
+        _staffCount   = staffCount;
+        _branchCount  = branchCount;
+        _statsLoaded  = true;
+      });
     }
   }
 
@@ -243,21 +246,21 @@ class _HomeTabState extends State<HomeTab> {
       children: [
         Row(
           children: [
-            _statCard('Students', _studentCount.toString(),
-                Icons.school_outlined, const Color(0xFF1DB954)),
+            Expanded(child: _statCard('Students', _studentCount.toString(),
+                Icons.school_outlined, const Color(0xFF1DB954))),
             const SizedBox(width: 12),
-            _statCard('Courses', _courseCount.toString(),
-                Icons.menu_book_outlined, const Color(0xFF5BA3D9)),
+            Expanded(child: _statCard('Courses', _courseCount.toString(),
+                Icons.menu_book_outlined, const Color(0xFF5BA3D9))),
           ],
         ),
         const SizedBox(height: 12),
         Row(
           children: [
-            _statCard('Staff', _staffCount.toString(),
-                Icons.badge_outlined, const Color(0xFFE8A020)),
+            Expanded(child: _statCard('Staff', _staffCount.toString(),
+                Icons.badge_outlined, const Color(0xFFE8A020))),
             const SizedBox(width: 12),
-            _statCard('Branches', _branchCount.toString(),
-                Icons.account_tree_outlined, const Color(0xFF7F77DD)),
+            Expanded(child: _statCard('Branches', _branchCount.toString(),
+                Icons.account_tree_outlined, const Color(0xFF7F77DD))),
           ],
         ),
       ],
@@ -269,10 +272,14 @@ class _HomeTabState extends State<HomeTab> {
       stream: FirebaseFirestore.instance
           .collection('Student')
           .where('ClientID', isEqualTo: widget.clientId)
-          .orderBy('RegistrationDate', descending: true)
+          .orderBy('CreatedAt', descending: false)
           .limit(3)
           .snapshots(),
       builder: (context, snap) {
+        if (snap.hasError) {
+          debugPrint('Student stream error: ${snap.error}');
+          return _emptyCard('Unable to load students', Icons.school_outlined);
+        }
         if (!snap.hasData) return _loadingCard();
         final docs = snap.data!.docs;
         if (docs.isEmpty) return _emptyCard('No students yet', Icons.school_outlined);
@@ -285,7 +292,7 @@ class _HomeTabState extends State<HomeTab> {
               final data = d.data() as Map<String, dynamic>;
               return _listCard(
                 title: data['Name'] ?? 'Unknown',
-                subtitle: data['Contact'] ?? '',
+                subtitle: data['StudentEnrollmentNo'] ?? '',
                 icon: Icons.person_outline_rounded,
                 iconColor: const Color(0xFF1DB954),
               );
@@ -301,9 +308,14 @@ class _HomeTabState extends State<HomeTab> {
       stream: FirebaseFirestore.instance
           .collection('Staff')
           .where('ClientID', isEqualTo: widget.clientId)
+          .orderBy('CreatedAt', descending: false)
           .limit(3)
           .snapshots(),
       builder: (context, snap) {
+        if (snap.hasError) {
+          debugPrint('Staff stream error: ${snap.error}');
+          return _emptyCard('Unable to load staff', Icons.badge_outlined);
+        }
         if (!snap.hasData) return _loadingCard();
         final docs = snap.data!.docs;
         if (docs.isEmpty) return _emptyCard('No staff yet', Icons.badge_outlined);
@@ -316,7 +328,7 @@ class _HomeTabState extends State<HomeTab> {
               final data = d.data() as Map<String, dynamic>;
               return _listCard(
                 title: data['StaffName'] ?? 'Unknown',
-                subtitle: data['Role'] ?? '',
+                subtitle: '${data['Role'] ?? ''} · ${data['StaffEnrollmentNo'] ?? ''}',
                 icon: Icons.badge_outlined,
                 iconColor: const Color(0xFFE8A020),
               );
@@ -332,9 +344,14 @@ class _HomeTabState extends State<HomeTab> {
       stream: FirebaseFirestore.instance
           .collection('Course')
           .where('ClientID', isEqualTo: widget.clientId)
+          .orderBy('CreatedAt', descending: false)
           .limit(3)
           .snapshots(),
       builder: (context, snap) {
+        if (snap.hasError) {
+          debugPrint('Course stream error: ${snap.error}');
+          return _emptyCard('Unable to load courses', Icons.menu_book_outlined);
+        }
         if (!snap.hasData) return _loadingCard();
         final docs = snap.data!.docs;
         if (docs.isEmpty) return _emptyCard('No courses yet', Icons.menu_book_outlined);
@@ -377,14 +394,30 @@ class _HomeTabState extends State<HomeTab> {
           children: docs.map((d) {
             final data = d.data() as Map<String, dynamic>;
             final ts = data['CreatedAt'] as Timestamp?;
-            final date = ts != null
-                ? _formatDate(ts.toDate())
-                : 'Recently';
+            final date = ts != null ? _formatDate(ts.toDate()) : 'Recently';
+            final userType = data['UserType'] as String? ?? 'User';
+            final name = data['AdminName'] as String? ?? data['Email'] ?? '';
+
+            IconData icon = Icons.person_add_outlined;
+            Color iconColor = const Color(0xFF1DB954);
+            String title = '$userType account created';
+
+            if (userType == 'Student') {
+              icon = Icons.school_outlined;
+              iconColor = const Color(0xFF5BA3D9);
+            } else if (userType == 'Staff') {
+              icon = Icons.badge_outlined;
+              iconColor = const Color(0xFFE8A020);
+            } else if (userType == 'Client') {
+              icon = Icons.business_outlined;
+              iconColor = const Color(0xFF1DB954);
+            }
+
             return _listCard(
-              title: '${data['UserType'] ?? 'User'} account created',
-              subtitle: '${data['AdminName'] ?? data['Email'] ?? ''} · $date',
-              icon: Icons.person_add_outlined,
-              iconColor: const Color(0xFF1DB954),
+              title: title,
+              subtitle: '$name · $date',
+              icon: icon,
+              iconColor: iconColor,
             );
           }).toList(),
         );
@@ -423,8 +456,8 @@ class _HomeTabState extends State<HomeTab> {
       );
 
   Widget _statCard(String label, String value, IconData icon, Color color) {
-    return Expanded(
-      child: Container(
+    return Container(
+        width: double.infinity,
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: const Color(0xFF152232),
@@ -461,7 +494,6 @@ class _HomeTabState extends State<HomeTab> {
                     fontSize: 12, color: Color(0xFF556677))),
           ],
         ),
-      ),
     );
   }
 
