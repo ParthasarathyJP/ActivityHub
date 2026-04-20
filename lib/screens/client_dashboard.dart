@@ -6,6 +6,7 @@ import 'dashboard/courses_tab.dart';
 import 'dashboard/people_tab.dart';
 import 'dashboard/finance_tab.dart';
 import 'dashboard/more_tab.dart';
+import 'events_screen.dart';
 
 class ClientDashboard extends StatefulWidget {
   final String clientId;
@@ -119,6 +120,10 @@ class _ClientDashboardState extends State<ClientDashboard>
               branchId: widget.branchId,
               userType: widget.userType,
             ),
+            EventsTab(
+              clientId: widget.clientId,
+              isClient: true,
+            ),
             MoreTab(
               clientId:        widget.clientId,
               branchId:        widget.branchId,
@@ -143,7 +148,7 @@ class _ClientDashboardState extends State<ClientDashboard>
       ),
       child: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
@@ -155,7 +160,9 @@ class _ClientDashboardState extends State<ClientDashboard>
                   Icons.people_outline_rounded, 'People'),
               _navItem(3, Icons.account_balance_wallet_rounded,
                   Icons.account_balance_wallet_outlined, 'Finance'),
-              _navItem(4, Icons.more_horiz_rounded,
+              _navItem(4, Icons.emoji_events_rounded,
+                  Icons.emoji_events_outlined, 'Events'),
+              _navItem(5, Icons.more_horiz_rounded,
                   Icons.more_horiz_rounded, 'More'),
             ],
           ),
@@ -166,16 +173,20 @@ class _ClientDashboardState extends State<ClientDashboard>
 
   Widget _navItem(int index, IconData activeIcon,
       IconData inactiveIcon, String label) {
-    final isActive = _currentIndex == index;
+    final isActive   = _currentIndex == index;
+    // Events tab (index 4) uses gold accent; all others use green
+    final activeColor = (index == 4)
+        ? const Color(0xFFE8A020)
+        : const Color(0xFF1DB954);
     return GestureDetector(
       onTap: () => _onTabTapped(index),
       behavior: HitTestBehavior.opaque,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: isActive
-              ? const Color(0xFF1DB954).withOpacity(0.12)
+              ? activeColor.withOpacity(0.12)
               : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
         ),
@@ -184,9 +195,7 @@ class _ClientDashboardState extends State<ClientDashboard>
           children: [
             Icon(
               isActive ? activeIcon : inactiveIcon,
-              color: isActive
-                  ? const Color(0xFF1DB954)
-                  : const Color(0xFF556677),
+              color: isActive ? activeColor : const Color(0xFF556677),
               size: 22,
             ),
             const SizedBox(height: 3),
@@ -196,9 +205,7 @@ class _ClientDashboardState extends State<ClientDashboard>
                 fontSize: 10,
                 fontWeight:
                     isActive ? FontWeight.w600 : FontWeight.normal,
-                color: isActive
-                    ? const Color(0xFF1DB954)
-                    : const Color(0xFF556677),
+                color: isActive ? activeColor : const Color(0xFF556677),
               ),
             ),
           ],
