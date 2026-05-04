@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Staff Dashboard
@@ -2572,8 +2573,11 @@ class _OnlineClassScreenState extends State<OnlineClassScreen> {
                           if (link.isNotEmpty) ...[
                             const SizedBox(height: 10),
                             GestureDetector(
-                              onTap: () {
-                                // TODO: url_launcher to open link
+                              onTap: () async {
+                                if (await canLaunchUrl(Uri.parse(link))) {
+                                  await launchUrl(Uri.parse(link),
+                                      mode: LaunchMode.externalApplication);
+                                }
                               },
                               child: Container(
                                 width: double.infinity,

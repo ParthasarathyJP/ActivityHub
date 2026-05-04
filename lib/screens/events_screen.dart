@@ -4,14 +4,20 @@ import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'dart:io';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // FIRESTORE SCHEMA (reference)
 //
 // Events/{EventID}
-//   EventID, ClientID, Title, Description, EventDate (String 'YYYY-MM-DD'),
-//   Venue, MaxParticipants (int), IsActive (bool), CreatedAt,
+//   EventID, ClientID, Title, Description,
+//   EventStartDate (String 'YYYY-MM-DD'), EventEndDate (String 'YYYY-MM-DD'),
+//   Venue, MaxParticipants (int), IsActive (bool), IsGlobal (bool), CreatedAt,
 //   Status: 'Upcoming' | 'Ongoing' | 'Completed'
+//   CertificateURL (String?) — uploaded PDF in Firebase Storage
+//     path: certificates/{clientId}/{eventId}/template.pdf
 //
 // EventEnrollments/{EnrollmentID}
 //   EnrollmentID, ClientID, EventID, EventTitle,
@@ -64,24 +70,36 @@ class _EventsTabState extends State<EventsTab> {
   Future<void> _load() async {
     setState(() => _isLoading = true);
     try {
-      QuerySnapshot snap;
-      try {
-        snap = await FirebaseFirestore.instance
+      // Fetch client-specific events + global events in parallel
+      final results = await Future.wait([
+        FirebaseFirestore.instance
             .collection('Events')
             .where('ClientID', isEqualTo: widget.clientId)
             .where('IsActive', isEqualTo: true)
-            .orderBy('EventDate', descending: false)
-            .get();
-      } catch (_) {
-        snap = await FirebaseFirestore.instance
+            .get(),
+        FirebaseFirestore.instance
             .collection('Events')
-            .where('ClientID', isEqualTo: widget.clientId)
+            .where('IsGlobal', isEqualTo: true)
             .where('IsActive', isEqualTo: true)
-            .get();
+            .get(),
+      ]);
+
+      final seen   = <String>{};
+      final merged = <Map<String, dynamic>>[];
+      for (final snap in results) {
+        for (final d in (snap as QuerySnapshot).docs) {
+          if (seen.add(d.id)) {
+            merged.add({...(d.data() as Map<String, dynamic>), 'DocID': d.id});
+          }
+        }
       }
+      // Sort by EventStartDate ascending
+      merged.sort((a, b) =>
+          (a['EventStartDate'] as String? ?? '')
+          .compareTo(b['EventStartDate'] as String? ?? ''));
+
       if (mounted) setState(() {
-        _events = snap.docs.map((d) =>
-            {...(d.data() as Map<String, dynamic>), 'DocID': d.id}).toList();
+        _events    = merged;
         _isLoading = false;
       });
     } catch (e) {
@@ -98,159 +116,337 @@ class _EventsTabState extends State<EventsTab> {
   void _showEventSheet({Map<String, dynamic>? event}) {
     final titleCtrl  = TextEditingController(text: event?['Title'] ?? '');
     final descCtrl   = TextEditingController(text: event?['Description'] ?? '');
-    final dateCtrl   = TextEditingController(text: event?['EventDate'] ?? '');
+    final startCtrl  = TextEditingController(text: event?['EventStartDate'] ?? '');
+    final endCtrl    = TextEditingController(text: event?['EventEndDate'] ?? '');
     final venueCtrl  = TextEditingController(text: event?['Venue'] ?? '');
     final maxCtrl    = TextEditingController(
         text: event != null ? '${event['MaxParticipants'] ?? ''}' : '');
-    String status    = event?['Status'] ?? 'Upcoming';
-    bool saving      = false;
-    final isEdit     = event != null;
+    String status      = event?['Status'] ?? 'Upcoming';
+    bool   isGlobal    = event?['IsGlobal'] == true;
+    bool   saving      = false;
+    // Certificate upload state
+    String? certUrl        = event?['CertificateURL'] as String?;
+    String? certFileName;
+    bool    uploadingCert  = false;
+    final   isEdit         = event != null;
 
     showModalBottomSheet(
       context: context, isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, ss) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: Container(
-          decoration: const BoxDecoration(color: _card,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-          padding: const EdgeInsets.all(24),
-          child: SingleChildScrollView(child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start, children: [
-            // Handle
-            Center(child: Container(width: 40, height: 4,
-                decoration: BoxDecoration(color: _border,
-                    borderRadius: BorderRadius.circular(2)))),
-            const SizedBox(height: 20),
-            // Header
-            Row(children: [
-              Container(width: 36, height: 36,
-                decoration: BoxDecoration(
-                    color: _accent.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(10)),
-                child: const Icon(Icons.emoji_events_outlined,
-                    color: _accent, size: 18)),
-              const SizedBox(width: 12),
-              Text(isEdit ? 'Edit Event' : 'New Event',
-                  style: const TextStyle(fontFamily: 'Georgia', fontSize: 18,
-                      fontWeight: FontWeight.bold, color: Colors.white)),
-            ]),
-            const SizedBox(height: 20),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, ss) {
 
-            _lbl('Event Title *'), const SizedBox(height: 8),
-            _tf(ctrl: titleCtrl, hint: 'e.g. Annual Day Competition',
-                icon: Icons.title_rounded),
-            const SizedBox(height: 12),
+        // ── Certificate file picker + upload ──────────────────────────────────
+        Future<void> pickAndUploadCert() async {
+          final result = await FilePicker.platform.pickFiles(
+            type: FileType.custom,
+            allowedExtensions: ['pdf'],
+            withData: true,
+          );
+          if (result == null || result.files.isEmpty) return;
+          final picked = result.files.first;
+          if (picked.bytes == null) return;
 
-            _lbl('Description'), const SizedBox(height: 8),
-            TextField(controller: descCtrl, maxLines: 3,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-              cursorColor: _accent,
-              decoration: InputDecoration(
-                hintText: 'Brief description of the event…',
-                hintStyle: const TextStyle(color: _dimmed),
-                filled: true, fillColor: _bg,
-                contentPadding: const EdgeInsets.all(14),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: _border)),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: _border)),
-                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: _accent, width: 1.5)))),
-            const SizedBox(height: 12),
+          ss(() { uploadingCert = true; certFileName = picked.name; });
 
-            Row(children: [
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                _lbl('Event Date *'), const SizedBox(height: 8),
-                _tf(ctrl: dateCtrl, hint: 'YYYY-MM-DD',
-                    icon: Icons.calendar_today_outlined,
-                    kb: TextInputType.datetime),
-              ])),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                _lbl('Max Participants'), const SizedBox(height: 8),
-                _tf(ctrl: maxCtrl, hint: 'e.g. 50',
-                    icon: Icons.group_outlined,
-                    kb: TextInputType.number),
-              ])),
-            ]),
-            const SizedBox(height: 12),
+          try {
+            // Determine the event ID — for new events generate a temp doc ref
+            final db     = FirebaseFirestore.instance;
+            final docRef = isEdit
+                ? db.collection('Events').doc(event!['DocID'])
+                : db.collection('Events').doc();
+            final path   =
+                'certificates/${widget.clientId}/${docRef.id}/template.pdf';
 
-            _lbl('Venue'), const SizedBox(height: 8),
-            _tf(ctrl: venueCtrl, hint: 'Hall / Online / Address',
-                icon: Icons.location_on_outlined),
-            const SizedBox(height: 14),
+            final storageRef =
+                FirebaseStorage.instance.ref().child(path);
+            final uploadTask = storageRef.putData(
+              picked.bytes!,
+              SettableMetadata(contentType: 'application/pdf'),
+            );
 
-            // Status chips
-            _lbl('Status'), const SizedBox(height: 8),
-            Wrap(spacing: 8, children: ['Upcoming', 'Ongoing', 'Completed'].map((s) {
-              final sel = status == s;
-              final color = s == 'Upcoming' ? _blue
-                  : s == 'Ongoing' ? _green : _muted;
-              return GestureDetector(
-                onTap: () => ss(() => status = s),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+            final snap = await uploadTask;
+            final url  = await snap.ref.getDownloadURL();
+            ss(() { certUrl = url; uploadingCert = false; });
+          } catch (e) {
+            ss(() => uploadingCert = false);
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                content: Text('Upload failed: $e'),
+                backgroundColor: _red));
+            }
+          }
+        }
+
+        return Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: Container(
+            decoration: const BoxDecoration(color: _card,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+            padding: const EdgeInsets.all(24),
+            child: SingleChildScrollView(child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // Handle
+              Center(child: Container(width: 40, height: 4,
+                  decoration: BoxDecoration(color: _border,
+                      borderRadius: BorderRadius.circular(2)))),
+              const SizedBox(height: 20),
+
+              // Header
+              Row(children: [
+                Container(width: 36, height: 36,
                   decoration: BoxDecoration(
-                    color: sel ? color : _bg,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: sel ? color : _border)),
-                  child: Text(s, style: TextStyle(fontSize: 12,
-                      color: sel ? Colors.white : const Color(0xFF8899AA)))));
-            }).toList()),
-            const SizedBox(height: 20),
+                      color: _accent.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(10)),
+                  child: const Icon(Icons.emoji_events_outlined,
+                      color: _accent, size: 18)),
+                const SizedBox(width: 12),
+                Text(isEdit ? 'Edit Event' : 'New Event',
+                    style: const TextStyle(fontFamily: 'Georgia', fontSize: 18,
+                        fontWeight: FontWeight.bold, color: Colors.white)),
+              ]),
+              const SizedBox(height: 20),
 
-            // Save button
-            SizedBox(width: double.infinity, child: ElevatedButton(
-              onPressed: saving ? null : () async {
-                if (titleCtrl.text.trim().isEmpty ||
-                    dateCtrl.text.trim().isEmpty) return;
-                ss(() => saving = true);
-                try {
-                  final db  = FirebaseFirestore.instance;
-                  final max = int.tryParse(maxCtrl.text.trim()) ?? 0;
-                  final payload = {
-                    'ClientID':         widget.clientId,
-                    'Title':            titleCtrl.text.trim(),
-                    'Description':      descCtrl.text.trim(),
-                    'EventDate':        dateCtrl.text.trim(),
-                    'Venue':            venueCtrl.text.trim(),
-                    'MaxParticipants':  max,
-                    'Status':           status,
-                    'IsActive':         true,
-                    'UpdatedAt':        FieldValue.serverTimestamp(),
-                  };
-                  if (isEdit) {
-                    await db.collection('Events')
-                        .doc(event!['DocID']).update(payload);
-                  } else {
-                    final ref = db.collection('Events').doc();
-                    await ref.set({...payload,
-                      'EventID':   ref.id,
-                      'CreatedAt': FieldValue.serverTimestamp()});
-                  }
-                  if (ctx.mounted) Navigator.pop(ctx);
-                  await _load();
-                } catch (e) { ss(() => saving = false); }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _accent, foregroundColor: Colors.white,
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14)),
-                padding: const EdgeInsets.symmetric(vertical: 14)),
-              child: saving
-                  ? const SizedBox(width: 20, height: 20,
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2))
-                  : Text(isEdit ? 'Save Changes' : 'Create Event',
-                      style: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600)))),
-            const SizedBox(height: 8),
-          ]))),
-        )));
+              _lbl('Event Title *'), const SizedBox(height: 8),
+              _tf(ctrl: titleCtrl, hint: 'e.g. Annual Day Competition',
+                  icon: Icons.title_rounded),
+              const SizedBox(height: 12),
+
+              _lbl('Description'), const SizedBox(height: 8),
+              TextField(controller: descCtrl, maxLines: 3,
+                style: const TextStyle(color: Colors.white, fontSize: 14),
+                cursorColor: _accent,
+                decoration: InputDecoration(
+                  hintText: 'Brief description of the event…',
+                  hintStyle: const TextStyle(color: _dimmed),
+                  filled: true, fillColor: _bg,
+                  contentPadding: const EdgeInsets.all(14),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: _border)),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: _border)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: _accent, width: 1.5)))),
+              const SizedBox(height: 12),
+
+              // Date range
+              Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _lbl('Start Date *'), const SizedBox(height: 8),
+                  _tf(ctrl: startCtrl, hint: 'YYYY-MM-DD',
+                      icon: Icons.calendar_today_outlined,
+                      kb: TextInputType.datetime),
+                ])),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _lbl('End Date *'), const SizedBox(height: 8),
+                  _tf(ctrl: endCtrl, hint: 'YYYY-MM-DD',
+                      icon: Icons.calendar_month_outlined,
+                      kb: TextInputType.datetime),
+                ])),
+              ]),
+              const SizedBox(height: 12),
+
+              // Venue + Max
+              Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _lbl('Venue'), const SizedBox(height: 8),
+                  _tf(ctrl: venueCtrl, hint: 'Hall / Online / Address',
+                      icon: Icons.location_on_outlined),
+                ])),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _lbl('Max Participants'), const SizedBox(height: 8),
+                  _tf(ctrl: maxCtrl, hint: 'e.g. 50',
+                      icon: Icons.group_outlined,
+                      kb: TextInputType.number),
+                ])),
+              ]),
+              const SizedBox(height: 12),
+
+              // ── Certificate upload ─────────────────────────────────────────
+              _lbl('Certificate Template (PDF)'), const SizedBox(height: 8),
+              GestureDetector(
+                onTap: uploadingCert ? null : pickAndUploadCert,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: _bg,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: certUrl != null ? _green.withOpacity(0.5) : _border)),
+                  child: uploadingCert
+                      ? Row(children: [
+                          const SizedBox(width: 18, height: 18,
+                            child: CircularProgressIndicator(
+                                color: _accent, strokeWidth: 2)),
+                          const SizedBox(width: 12),
+                          Expanded(child: Text(
+                              'Uploading ${certFileName ?? ''}…',
+                              style: const TextStyle(
+                                  fontSize: 13, color: _muted))),
+                        ])
+                      : certUrl != null
+                          ? Row(children: [
+                              const Icon(Icons.check_circle_outline_rounded,
+                                  color: _green, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(child: Text(
+                                  certFileName ?? 'template.pdf',
+                                  style: const TextStyle(
+                                      fontSize: 13, color: Colors.white),
+                                  overflow: TextOverflow.ellipsis)),
+                              GestureDetector(
+                                onTap: () => ss(() {
+                                  certUrl = null;
+                                  certFileName = null;
+                                }),
+                                child: const Icon(Icons.close_rounded,
+                                    color: _muted, size: 18)),
+                            ])
+                          : Row(children: [
+                              const Icon(Icons.upload_file_outlined,
+                                  color: _dimmed, size: 20),
+                              const SizedBox(width: 10),
+                              const Text('Tap to upload PDF from device',
+                                  style: TextStyle(
+                                      fontSize: 13, color: _dimmed)),
+                            ]))),
+              const SizedBox(height: 4),
+              Text(
+                certUrl != null
+                    ? 'Saved to: certificates/${widget.clientId}/…/template.pdf'
+                    : 'PDF will be saved to your client folder in Firebase Storage.',
+                style: const TextStyle(fontSize: 10, color: Color(0xFF3A5068))),
+              const SizedBox(height: 14),
+
+              // ── Status chips ───────────────────────────────────────────────
+              _lbl('Status'), const SizedBox(height: 8),
+              Wrap(spacing: 8, children: ['Upcoming', 'Ongoing', 'Completed'].map((s) {
+                final sel   = status == s;
+                final color = s == 'Upcoming' ? _blue
+                    : s == 'Ongoing' ? _green : _muted;
+                return GestureDetector(
+                  onTap: () => ss(() => status = s),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: sel ? color : _bg,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: sel ? color : _border)),
+                    child: Text(s, style: TextStyle(fontSize: 12,
+                        color: sel ? Colors.white
+                            : const Color(0xFF8899AA)))));
+              }).toList()),
+              const SizedBox(height: 14),
+
+              // ── Global Event toggle ────────────────────────────────────────
+              GestureDetector(
+                onTap: () => ss(() => isGlobal = !isGlobal),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isGlobal
+                        ? _purple.withOpacity(0.12) : _bg,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                        color: isGlobal
+                            ? _purple.withOpacity(0.5) : _border)),
+                  child: Row(children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 42, height: 24,
+                      decoration: BoxDecoration(
+                        color: isGlobal ? _purple : _dimmed,
+                        borderRadius: BorderRadius.circular(12)),
+                      child: AnimatedAlign(
+                        duration: const Duration(milliseconds: 200),
+                        alignment: isGlobal
+                            ? Alignment.centerRight : Alignment.centerLeft,
+                        child: Container(
+                          width: 18, height: 18,
+                          margin: const EdgeInsets.symmetric(horizontal: 3),
+                          decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(9))))),
+                    const SizedBox(width: 12),
+                    Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      Text('Global Event',
+                          style: TextStyle(fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: isGlobal ? _purple : Colors.white)),
+                      Text(
+                        isGlobal
+                            ? 'Visible to all clients & students'
+                            : 'Visible only to your students',
+                        style: const TextStyle(
+                            fontSize: 11, color: _muted)),
+                    ])),
+                    Icon(Icons.public_rounded,
+                        color: isGlobal ? _purple : _dimmed, size: 20),
+                  ]))),
+              const SizedBox(height: 20),
+
+              // ── Save button ────────────────────────────────────────────────
+              SizedBox(width: double.infinity, child: ElevatedButton(
+                onPressed: (saving || uploadingCert) ? null : () async {
+                  if (titleCtrl.text.trim().isEmpty ||
+                      startCtrl.text.trim().isEmpty ||
+                      endCtrl.text.trim().isEmpty) return;
+                  ss(() => saving = true);
+                  try {
+                    final db  = FirebaseFirestore.instance;
+                    final max = int.tryParse(maxCtrl.text.trim()) ?? 0;
+                    final payload = {
+                      'ClientID':        widget.clientId,
+                      'Title':           titleCtrl.text.trim(),
+                      'Description':     descCtrl.text.trim(),
+                      'EventStartDate':  startCtrl.text.trim(),
+                      'EventEndDate':    endCtrl.text.trim(),
+                      'Venue':           venueCtrl.text.trim(),
+                      'MaxParticipants': max,
+                      'Status':          status,
+                      'IsGlobal':        isGlobal,
+                      'CertificateURL':  certUrl ?? '',
+                      'IsActive':        true,
+                      'UpdatedAt':       FieldValue.serverTimestamp(),
+                    };
+                    if (isEdit) {
+                      await db.collection('Events')
+                          .doc(event!['DocID']).update(payload);
+                    } else {
+                      final ref = db.collection('Events').doc();
+                      await ref.set({...payload,
+                        'EventID':   ref.id,
+                        'CreatedAt': FieldValue.serverTimestamp()});
+                    }
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    await _load();
+                  } catch (e) { ss(() => saving = false); }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accent, foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                  padding: const EdgeInsets.symmetric(vertical: 14)),
+                child: (saving || uploadingCert)
+                    ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                            color: Colors.white, strokeWidth: 2))
+                    : Text(isEdit ? 'Save Changes' : 'Create Event',
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600)))),
+              const SizedBox(height: 8),
+            ]))));
+      }));
   }
 
   // ── Delete event ────────────────────────────────────────────────────────────
@@ -420,11 +616,15 @@ class _EventCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final title   = event['Title']    as String? ?? '—';
-    final date    = event['EventDate'] as String? ?? '';
-    final venue   = event['Venue']    as String? ?? '';
+    final title   = event['Title']         as String? ?? '—';
+    final startDate = event['EventStartDate'] as String? ?? '';
+    final endDate   = event['EventEndDate']   as String? ?? '';
+    final dateLabel = (startDate == endDate || endDate.isEmpty)
+        ? startDate
+        : '$startDate → $endDate';
+    final venue   = event['Venue']          as String? ?? '';
     final max     = event['MaxParticipants'] as int? ?? 0;
-    final status  = event['Status']   as String? ?? 'Upcoming';
+    final status  = event['Status']         as String? ?? 'Upcoming';
 
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(
@@ -453,8 +653,8 @@ class _EventCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(title, style: const TextStyle(fontSize: 15,
                   fontWeight: FontWeight.w600, color: Colors.white)),
-              if (date.isNotEmpty)
-                Text(date, style: const TextStyle(
+              if (dateLabel.isNotEmpty)
+                Text(dateLabel, style: const TextStyle(
                     fontSize: 11, color: _muted)),
             ])),
             // Status badge
@@ -544,7 +744,11 @@ class EventDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final title   = event['Title']       as String? ?? '—';
-    final date    = event['EventDate']   as String? ?? '—';
+    final startDate = event['EventStartDate'] as String? ?? '';
+    final endDate   = event['EventEndDate']   as String? ?? '';
+    final dateRange = (startDate == endDate || endDate.isEmpty)
+        ? startDate
+        : '$startDate → $endDate';
     final venue   = event['Venue']       as String? ?? '—';
     final desc    = event['Description'] as String? ?? '';
     final max     = event['MaxParticipants'] as int? ?? 0;
@@ -597,7 +801,7 @@ class EventDetailScreen extends StatelessWidget {
                   child: const Icon(Icons.emoji_events_outlined,
                       color: _accent, size: 32))),
                 const SizedBox(height: 16),
-                _row(Icons.calendar_today_outlined, 'Date', date),
+                _row(Icons.calendar_today_outlined, 'Date', dateRange),
                 if (venue.isNotEmpty) ...[
                   const SizedBox(height: 10),
                   _row(Icons.location_on_outlined, 'Venue', venue),
@@ -605,6 +809,17 @@ class EventDetailScreen extends StatelessWidget {
                 if (max > 0) ...[
                   const SizedBox(height: 10),
                   _row(Icons.group_outlined, 'Capacity', '$max participants'),
+                ],
+                if ((event['CertificateURL'] as String? ?? '').isNotEmpty) ...[
+                  const Divider(color: _border, height: 24),
+                  Row(children: [
+                    const Icon(Icons.workspace_premium_outlined,
+                        color: _accent, size: 16),
+                    const SizedBox(width: 8),
+                    const Text('Certificate template attached',
+                        style: TextStyle(fontSize: 12,
+                            color: _accent, fontWeight: FontWeight.w500)),
+                  ]),
                 ],
                 if (desc.isNotEmpty) ...[
                   const Divider(color: _border, height: 24),
@@ -1043,6 +1258,8 @@ class _StudentEventsTabState extends State<StudentEventsTab> {
   Future<void> _downloadCertificate(Map<String, dynamic> event,
       Map<String, dynamic> enrollment) async {
     final score = enrollment['Score'];
+    final startDate = event['EventStartDate'] as String? ?? '';
+    final endDate   = event['EventEndDate']   as String? ?? '';
     final pdf   = pw.Document();
 
     pdf.addPage(pw.Page(
@@ -1091,8 +1308,8 @@ class _StudentEventsTabState extends State<StudentEventsTab> {
                   fontWeight: pw.FontWeight.bold, color: PdfColors.grey800),
               textAlign: pw.TextAlign.center),
           pw.SizedBox(height: 6),
-          if ((event['EventDate'] as String? ?? '').isNotEmpty)
-            pw.Text('held on ${event['EventDate']}',
+          if (startDate.isNotEmpty)
+            pw.Text('held on $startDate${endDate.isNotEmpty && endDate != startDate ? " to $endDate" : ""}',
                 style: pw.TextStyle(fontSize: 12, color: PdfColors.grey600)),
           if ((event['Venue'] as String? ?? '').isNotEmpty)
             pw.Text('at ${event['Venue']}',
@@ -1237,7 +1454,11 @@ class _StudentEventCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final title  = event['Title']     as String? ?? '—';
-    final date   = event['EventDate'] as String? ?? '';
+    final startDate = event['EventStartDate'] as String? ?? '';
+    final endDate   = event['EventEndDate']   as String? ?? '';
+    final date      = (startDate == endDate || endDate.isEmpty)
+        ? startDate
+        : '$startDate → $endDate';
     final venue  = event['Venue']     as String? ?? '';
     final status = event['Status']    as String? ?? 'Upcoming';
 
